@@ -27,8 +27,8 @@ Modified for BetterStack by Mitch Lewandowski for SugarCRM (mitch-sugarcrm on Gi
 
 1. Clone the repository:
    ```sh
-   git clone https://github.com/mitch-sugarcrm/betterstack-uptime-calculator.git
-   cd betterstack-uptime-calculator
+   git clone https://github.com/mitch-sugarcrm/betterstack-report-tool.git
+   cd betterstack-report-tool
    ```
 
 2. Set up your BetterStack API credentials:
