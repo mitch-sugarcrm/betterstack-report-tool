@@ -462,22 +462,50 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
+    // Calculate column widths
+    let mut max_name_len = "Monitor Name".len();
+    for u in &uptime_calculations {
+        let name_len = u["name"].as_str().unwrap_or("").len();
+        if name_len > max_name_len {
+            max_name_len = name_len;
+        }
+    }
+
+    // Print table header
+    println!("\n{}", "=".repeat(max_name_len + 30));
+    println!(
+        "{:<width$} | {:>8} | {:>12}",
+        "Monitor Name",
+        "Uptime %",
+        "Downtime",
+        width = max_name_len
+    );
+    println!("{}", "=".repeat(max_name_len + 30));
+
     // Print all monitors with 100% uptime first
     let mut printed_separator = false;
     for u in &uptime_calculations {
         let percentage = u["percentage"].as_f64().unwrap_or(0.0);
+        let name = u["name"].as_str().unwrap_or("");
+        let downtime_mins = u["downtime_mins"].as_i64().unwrap_or(0);
 
         // Print separator before first monitor with <100% uptime
         if percentage < 100.0 && !printed_separator {
-            println!("\n--- Monitors with downtime in the date range (best to worst) ---");
+            println!("{}", "-".repeat(max_name_len + 30));
+            println!("Monitors with downtime (best to worst):");
+            println!("{}", "-".repeat(max_name_len + 30));
             printed_separator = true;
         }
 
         println!(
-            "{}, {}%, {} mins",
-            u["name"], u["percentage"], u["downtime_mins"]
+            "{:<width$} | {:>7.2}% | {:>10} mins",
+            name,
+            percentage,
+            downtime_mins,
+            width = max_name_len
         );
     }
+    println!("{}", "=".repeat(max_name_len + 30));
 
     Ok(())
 }
