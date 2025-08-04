@@ -516,6 +516,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     println!("{}", "=".repeat(max_name_len + 30));
 
+    // Calculate average uptime
+    let total_uptime: f64 = uptime_calculations
+        .iter()
+        .map(|u| u["percentage"].as_f64().unwrap_or(0.0))
+        .sum();
+    let average_uptime = if !uptime_calculations.is_empty() {
+        total_uptime / uptime_calculations.len() as f64
+    } else {
+        0.0
+    };
+
     // Print all monitors with 100% uptime first
     let mut printed_separator = false;
     for u in &uptime_calculations {
@@ -531,15 +542,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
             printed_separator = true;
         }
 
-        println!(
-            "{:<width$} | {:>7.2}% | {:>10} mins",
-            name,
-            percentage,
-            downtime_mins,
-            width = max_name_len
-        );
+        // Format percentage based on whether it's 100% or not
+        if percentage == 100.0 {
+            println!(
+                "{:<width$} | {:>7}% | {:>10} mins",
+                name,
+                "100",
+                downtime_mins,
+                width = max_name_len
+            );
+        } else {
+            println!(
+                "{:<width$} | {:>7.2}% | {:>10} mins",
+                name,
+                percentage,
+                downtime_mins,
+                width = max_name_len
+            );
+        }
     }
     println!("{}", "=".repeat(max_name_len + 30));
+    
+    // Display average uptime with conditional formatting
+    if average_uptime == 100.0 {
+        println!("\nAverage Uptime: 100%");
+    } else {
+        println!("\nAverage Uptime: {:.4}%", average_uptime);
+    }
+    println!("Total Monitors: {}", uptime_calculations.len());
 
     Ok(())
 }
