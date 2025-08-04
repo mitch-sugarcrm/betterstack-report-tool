@@ -30,6 +30,11 @@ struct Args {
     /// Only include monitors that are published on status pages
     #[arg(long, action = clap::ArgAction::SetTrue)]
     status_page_only: bool,
+
+    /// Search terms to filter monitors (any term can match, case-insensitive)
+    /// Can be specified multiple times: --search "premium us 02" --search "api"
+    #[arg(long, action = clap::ArgAction::Append)]
+    search: Vec<String>,
 }
 
 /// BetterStack API client for making authenticated requests
@@ -443,6 +448,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .into_iter()
         .filter_map(Result::ok)
         .collect();
+
+    // Apply search filter if provided
+    if !args.search.is_empty() {
+        let search_terms = &args.search;
+        uptime_calculations = uptime_calculations
+            .into_iter()
+            .filter(|monitor| {
+                if let Some(name) = monitor["name"].as_str() {
+                    let name_lower = name.to_lowercase();
+                    // Any search term must match (OR operator)
+                    search_terms.iter().any(|term| {
+                        name_lower.contains(&term.to_lowercase())
+                    })
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        // Check if we have any results after filtering
+        if uptime_calculations.is_empty() {
+            println!("\nNo monitors found matching any of the search terms: {}", search_terms.join(", "));
+            return Ok(());
+        }
+
+        println!("\nFound {} monitors matching any of the search terms: {}", 
+                 uptime_calculations.len(), 
+                 search_terms.join(", "));
+    }
 
     // Sort monitors: 100% uptime first (alphabetically), then <100% from best to worst
     uptime_calculations.sort_by(|a, b| {
