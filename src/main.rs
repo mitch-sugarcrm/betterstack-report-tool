@@ -61,7 +61,7 @@ impl BetterStackApi {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             "Authorization",
-            header::HeaderValue::from_str(&format!("Bearer {}", api_key)).unwrap(),
+            header::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
         );
 
         let client = Client::builder().default_headers(headers).build().unwrap();
@@ -85,7 +85,7 @@ impl BetterStackApi {
         loop {
             let response = self
                 .client
-                .get(&format!("{}/monitors?page={}", self.api_uri, page))
+                .get(format!("{}/monitors?page={}", self.api_uri, page))
                 .send()
                 .await?;
 
@@ -145,16 +145,19 @@ impl BetterStackApi {
     }
 
     /// Retrieves all status pages from the BetterStack account
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// * `Ok(String)` - JSON string containing all status pages data
     /// * `Err` - If the API request fails
     async fn get_status_pages(&self) -> Result<String, Box<dyn Error>> {
         // Status pages API uses betteruptime.com instead of uptime.betterstack.com
-        let status_page_uri = self.api_uri.replace("uptime.betterstack.com", "betteruptime.com");
-        let response = self.client
-            .get(&format!("{}/status-pages", status_page_uri))
+        let status_page_uri = self
+            .api_uri
+            .replace("uptime.betterstack.com", "betteruptime.com");
+        let response = self
+            .client
+            .get(format!("{status_page_uri}/status-pages"))
             .send()
             .await?;
 
@@ -162,76 +165,90 @@ impl BetterStackApi {
     }
 
     /// Retrieves all resources (monitors) for a specific status page
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `status_page_id` - The ID of the status page
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// * `Ok(String)` - JSON string containing the status page resources
     /// * `Err` - If the API request fails
-    async fn get_status_page_resources(&self, status_page_id: &str) -> Result<String, Box<dyn Error>> {
+    async fn get_status_page_resources(
+        &self,
+        status_page_id: &str,
+    ) -> Result<String, Box<dyn Error>> {
         let mut all_resources = Vec::new();
         let mut page = 1;
-        
+
         loop {
-            let response = self.client
-                .get(&format!("{}/status-pages/{}/resources?page={}", self.api_uri, status_page_id, page))
+            let response = self
+                .client
+                .get(format!(
+                    "{}/status-pages/{}/resources?page={}",
+                    self.api_uri, status_page_id, page
+                ))
                 .send()
                 .await?;
-            
+
             let response_text = response.text().await?;
             let response_json: Value = serde_json::from_str(&response_text)?;
-            
+
             // Extract resources from this page
             if let Some(data) = response_json["data"].as_array() {
                 all_resources.extend(data.clone());
             }
-            
+
             // Check if there's a next page
             if response_json["pagination"]["next"].is_null() {
                 break;
             }
-            
+
             page += 1;
         }
-        
+
         // Construct the final response with all resources
         let final_response = serde_json::json!({
             "data": all_resources
         });
-        
+
         Ok(final_response.to_string())
     }
 
     /// Retrieves all monitor IDs that are published on status pages
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// * `Ok(Vec<String>)` - Vector of monitor IDs that are on status pages
     /// * `Err` - If the API request fails
     async fn get_status_page_monitors(&self) -> Result<Vec<String>, Box<dyn Error>> {
         let mut monitor_ids = Vec::new();
-        
+
         // Get all status pages
         let status_pages: Value = serde_json::from_str(&self.get_status_pages().await?)?;
-        
+
         if let Some(pages) = status_pages["data"].as_array() {
             for page in pages {
                 if let Some(page_id) = page["id"].as_str() {
                     // Get resources for this status page
-                    let resources: Value = serde_json::from_str(&self.get_status_page_resources(page_id).await?)?;
-                    
+                    let resources: Value =
+                        serde_json::from_str(&self.get_status_page_resources(page_id).await?)?;
+
                     if let Some(resources_data) = resources["data"].as_array() {
                         for resource in resources_data {
                             // Check if this resource is a monitor
-                            if let Some(resource_type) = resource["attributes"]["resource_type"].as_str() {
+                            if let Some(resource_type) =
+                                resource["attributes"]["resource_type"].as_str()
+                            {
                                 if resource_type == "Monitor" {
                                     // Resource ID can be either string or number
-                                    if let Some(monitor_id) = resource["attributes"]["resource_id"].as_str() {
+                                    if let Some(monitor_id) =
+                                        resource["attributes"]["resource_id"].as_str()
+                                    {
                                         monitor_ids.push(monitor_id.to_string());
-                                    } else if let Some(monitor_id) = resource["attributes"]["resource_id"].as_u64() {
+                                    } else if let Some(monitor_id) =
+                                        resource["attributes"]["resource_id"].as_u64()
+                                    {
                                         monitor_ids.push(monitor_id.to_string());
                                     }
                                 }
@@ -241,11 +258,11 @@ impl BetterStackApi {
                 }
             }
         }
-        
+
         // Remove duplicates in case a monitor appears on multiple status pages
         monitor_ids.sort();
         monitor_ids.dedup();
-        
+
         Ok(monitor_ids)
     }
 
@@ -392,7 +409,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let monitors_to_process = if args.status_page_only {
         println!("Fetching monitors from status pages...");
         let status_page_monitor_ids = betterstack_api.get_status_page_monitors().await?;
-        
+
         // Filter all monitors to only include those on status pages
         let filtered_monitors: Vec<Value> = all_monitors["data"]
             .as_array()
@@ -407,19 +424,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
             })
             .cloned()
             .collect();
-        
-        println!("Found {} monitors on status pages out of {} total monitors", 
-                 filtered_monitors.len(), 
-                 all_monitors["data"].as_array().map(|a| a.len()).unwrap_or(0));
-        
+
+        println!(
+            "Found {} monitors on status pages out of {} total monitors",
+            filtered_monitors.len(),
+            all_monitors["data"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0)
+        );
+
         filtered_monitors
     } else {
         let monitor_count = all_monitors["data"]
             .as_array()
             .map(|a| a.len())
             .unwrap_or(0);
-        println!("Processing {} monitors...", monitor_count);
-        
+        println!("Processing {monitor_count} monitors...");
+
         all_monitors["data"].as_array().unwrap_or(&vec![]).clone()
     };
 
@@ -452,30 +474,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Apply search filter if provided
     if !args.search.is_empty() {
         let search_terms = &args.search;
-        uptime_calculations = uptime_calculations
-            .into_iter()
-            .filter(|monitor| {
-                if let Some(name) = monitor["name"].as_str() {
-                    let name_lower = name.to_lowercase();
-                    // Any search term must match (OR operator)
-                    search_terms.iter().any(|term| {
-                        name_lower.contains(&term.to_lowercase())
-                    })
-                } else {
-                    false
-                }
-            })
-            .collect();
+        uptime_calculations.retain(|monitor| {
+            if let Some(name) = monitor["name"].as_str() {
+                let name_lower = name.to_lowercase();
+                search_terms
+                    .iter()
+                    .any(|term| name_lower.contains(&term.to_lowercase()))
+            } else {
+                false
+            }
+        });
 
         // Check if we have any results after filtering
         if uptime_calculations.is_empty() {
-            println!("\nNo monitors found matching any of the search terms: {}", search_terms.join(", "));
+            println!(
+                "\nNo monitors found matching any of the search terms: {}",
+                search_terms.join(", ")
+            );
             return Ok(());
         }
 
-        println!("\nFound {} monitors matching any of the search terms: {}", 
-                 uptime_calculations.len(), 
-                 search_terms.join(", "));
+        println!(
+            "\nFound {} monitors matching any of the search terms: {}",
+            uptime_calculations.len(),
+            search_terms.join(", ")
+        );
     }
 
     // Sort monitors: 100% uptime first (alphabetically), then <100% from best to worst
@@ -553,7 +576,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             );
         } else {
             println!(
-                "{:<width$} | {:>7.2}% | {:>10} mins",
+                "{:<width$} | {:>7.3}% | {:>10} mins",
                 name,
                 percentage,
                 downtime_mins,
@@ -562,12 +585,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     println!("{}", "=".repeat(max_name_len + 30));
-    
+
     // Display average uptime with conditional formatting
     if average_uptime == 100.0 {
         println!("\nAverage Uptime: 100%");
     } else {
-        println!("\nAverage Uptime: {:.4}%", average_uptime);
+        println!("\nAverage Uptime: {average_uptime:.4}%");
     }
     println!("Total Monitors: {}", uptime_calculations.len());
 
