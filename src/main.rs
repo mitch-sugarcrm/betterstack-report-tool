@@ -39,6 +39,10 @@ struct Args {
     /// Can be specified multiple times: --search "premium us 02" --search "api"
     #[arg(long)]
     search: Vec<String>,
+
+    /// When all monitors have no downtime (100% uptime), skip the per-monitor table and show only the average summary
+    #[arg(long)]
+    skip_no_downtime: bool,
 }
 
 /// Generic paginated response wrapper
@@ -534,7 +538,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    // Calculate column widths
+    let no_downtime = uptime_calculations.iter().all(|u| u.percentage == 100.0);
+    if args.skip_no_downtime && no_downtime {
+        let total_uptime: f64 = uptime_calculations.iter().map(|u| u.percentage).sum();
+        let average_uptime = if !uptime_calculations.is_empty() {
+            total_uptime / uptime_calculations.len() as f64
+        } else {
+            0.0
+        };
+        if average_uptime == 100.0 {
+            println!("\nAverage Uptime: 100%");
+        } else {
+            println!("\nAverage Uptime: {average_uptime:.4}%");
+        }
+        println!("Total Monitors: {}", uptime_calculations.len());
+        return Ok(());
+    }
+
     let mut max_name_len = "Monitor Name".len();
     for u in &uptime_calculations {
         let name_len = u.name.len();
@@ -543,7 +563,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Print table header
     println!("\n{}", "=".repeat(max_name_len + 30));
     println!(
         "{:<width$} | {:>8} | {:>12}",
@@ -554,7 +573,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     println!("{}", "=".repeat(max_name_len + 30));
 
-    // Calculate average uptime
     let total_uptime: f64 = uptime_calculations.iter().map(|u| u.percentage).sum();
     let average_uptime = if !uptime_calculations.is_empty() {
         total_uptime / uptime_calculations.len() as f64
@@ -562,7 +580,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         0.0
     };
 
-    // Print all monitors with 100% uptime first
     let mut printed_separator = false;
     for u in &uptime_calculations {
         let percentage = u.percentage;
