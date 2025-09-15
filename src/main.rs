@@ -24,11 +24,11 @@ use url::Url;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Start date in MM/DD/YYYY or MM-DD-YYYY format (e.g., 01/01/2024)
-    #[arg(short, long, value_parser = parse_naive_date, requires = "end-date")]
+    #[arg(short, long, value_parser = parse_naive_date, requires = "end_date")]
     start_date: Option<NaiveDate>,
 
     /// End date in MM/DD/YYYY or MM-DD-YYYY format (e.g., 12/31/2024)
-    #[arg(short, long, value_parser = parse_naive_date, requires = "start-date")]
+    #[arg(short, long, value_parser = parse_naive_date, requires = "start_date")]
     end_date: Option<NaiveDate>,
 
     /// Only include monitors that are published on status pages
@@ -114,6 +114,32 @@ struct ResourceAttributes {
     resource_id: JsonValue,
 }
 
+/// Incident data from BetterStack API
+#[derive(Debug, Deserialize, Clone)]
+struct Incident {
+    #[allow(dead_code)]
+    id: String,
+    attributes: IncidentAttributes,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct IncidentAttributes {
+    started_at: Option<String>,
+    resolved_at: Option<String>,
+    #[allow(dead_code)]
+    acknowledger_name: Option<String>,
+    #[allow(dead_code)]
+    cause: Option<String>,
+}
+
+/// A downtime period extracted from incidents
+#[derive(Debug, Clone, Serialize)]
+struct DowntimePeriod {
+    started_at: String,
+    resolved_at: Option<String>,
+    duration_mins: Option<i64>,
+}
+
 /// Result of uptime calculation for a monitor
 #[derive(Debug, Clone, Serialize)]
 struct UptimeCalc {
@@ -124,6 +150,7 @@ struct UptimeCalc {
     downtime_mins: i64,
     uptime: u64,
     max_uptime: u64,
+    downtime_periods: Vec<DowntimePeriod>,
 }
 
 /// BetterStack API client for making authenticated requests
@@ -340,6 +367,126 @@ impl BetterStackApi {
         Ok(ids.into_iter().collect())
     }
 
+    /// Retrieves incidents/downtime events for a specific monitor
+    ///
+    /// Tries multiple possible API endpoints to find downtime events:
+    /// 1. /monitors/{id}/incidents
+    /// 2. /incidents?monitor_id={id}
+    /// 3. /monitors/{id}/events
+    /// 4. /heartbeats?monitor_id={id} (failed heartbeats indicate downtime)
+    ///
+    /// # Arguments
+    ///
+    /// * `monitor_id` - The ID of the monitor to query
+    /// * `from` - Start of the date range (UTC, inclusive)
+    /// * `to` - End of the date range (UTC, inclusive)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<Incident>)` with incident data
+    /// * `Err` if all API endpoints fail
+    async fn get_monitor_incidents(
+        &self,
+        monitor_id: &str,
+        from: &DateTime<Utc>,
+        to: &DateTime<Utc>,
+    ) -> Result<Vec<Incident>, Box<dyn Error>> {
+        // Try multiple possible endpoints
+        let endpoints = vec![
+            format!("/monitors/{}/incidents", monitor_id),
+            format!("/incidents?monitor_id={}", monitor_id),
+            format!("/monitors/{}/events", monitor_id),
+            format!("/monitors/{}/heartbeats", monitor_id),
+        ];
+
+        for endpoint_path in endpoints {
+            match self.try_fetch_incidents(&endpoint_path, from, to).await {
+                Ok(incidents) => {
+                    if !incidents.is_empty() {
+                        info!(
+                            monitor_id = monitor_id,
+                            endpoint = endpoint_path,
+                            count = incidents.len(),
+                            "Found incidents using endpoint"
+                        );
+                        return Ok(incidents);
+                    }
+                }
+                Err(e) => {
+                    // Only log warnings for first endpoint, others as debug
+                    if endpoint_path.contains("/incidents") {
+                        warn!(
+                            monitor_id = monitor_id,
+                            endpoint = endpoint_path,
+                            error = %e,
+                            "Primary incidents endpoint failed"
+                        );
+                    }
+                }
+            }
+        }
+
+        // If all endpoints fail, return empty list
+        Ok(Vec::new())
+    }
+
+    /// Helper method to try fetching incidents from a specific endpoint
+    async fn try_fetch_incidents(
+        &self,
+        endpoint_path: &str,
+        from: &DateTime<Utc>,
+        to: &DateTime<Utc>,
+    ) -> Result<Vec<Incident>, Box<dyn Error>> {
+        let mut all: Vec<Incident> = Vec::new();
+        let mut page: u32 = 1;
+
+        loop {
+            let mut url = Url::parse(&self.api_uri)?;
+            
+            // Handle different endpoint formats
+            if endpoint_path.contains('?') {
+                // Query parameter format like /incidents?monitor_id=123
+                let parts: Vec<&str> = endpoint_path.splitn(2, '?').collect();
+                url.path_segments_mut()
+                    .map_err(|_| "cannot be base")?
+                    .extend(parts[0].trim_start_matches('/').split('/').filter(|s| !s.is_empty()));
+                url.set_query(Some(parts[1]));
+            } else {
+                // Path format like /monitors/123/incidents
+                url.path_segments_mut()
+                    .map_err(|_| "cannot be base")?
+                    .extend(endpoint_path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()));
+            }
+            
+            url.query_pairs_mut()
+                .append_pair("page", &page.to_string())
+                .append_pair("from", &from.format("%Y-%m-%d").to_string())
+                .append_pair("to", &to.format("%Y-%m-%d").to_string());
+
+            let resp = self.client.get(url.clone()).send().await?;
+            if !resp.status().is_success() {
+                return Err(format!(
+                    "HTTP {} from endpoint {}",
+                    resp.status().as_u16(),
+                    endpoint_path
+                )
+                .into());
+            }
+            
+            let parsed: Paginated<Incident> = resp.json().await?;
+            all.extend(parsed.data);
+
+            match parsed.pagination.and_then(|p| p.next) {
+                Some(_) => {
+                    page += 1;
+                }
+                None => break,
+            }
+        }
+
+        Ok(all)
+    }
+
     /// Calculates uptime statistics for a specific monitor
     ///
     /// Fetches SLA data for the given date range and converts the reported
@@ -373,6 +520,42 @@ impl BetterStackApi {
         let total_seconds = (to.timestamp() - from.timestamp()).max(0) as u64;
         let uptime_seconds = (total_seconds as f64 * (availability / 100.0)) as u64;
 
+        // Fetch incidents only if there is downtime
+        let incidents = if total_downtime_secs > 0 {
+            self.get_monitor_incidents(monitor_id, from, to)
+                .await
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut downtime_periods = Vec::new();
+
+        for incident in incidents {
+            if let Some(started_at) = incident.attributes.started_at {
+                let duration_mins = if let Some(resolved_at) = &incident.attributes.resolved_at {
+                    // Parse the dates and calculate duration
+                    match (
+                        DateTime::parse_from_rfc3339(&started_at),
+                        DateTime::parse_from_rfc3339(resolved_at),
+                    ) {
+                        (Ok(start), Ok(end)) => {
+                            let duration = end.signed_duration_since(start);
+                            Some(duration.num_minutes())
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                downtime_periods.push(DowntimePeriod {
+                    started_at,
+                    resolved_at: incident.attributes.resolved_at,
+                    duration_mins,
+                });
+            }
+        }
+
         Ok(UptimeCalc {
             id: monitor_id.to_string(),
             name: monitor_name.to_string(),
@@ -381,6 +564,7 @@ impl BetterStackApi {
             downtime_mins,
             uptime: uptime_seconds,
             max_uptime: total_seconds,
+            downtime_periods,
         })
     }
 }
@@ -555,6 +739,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    // Check if we have any monitors with downtime to determine table format
+        let has_downtime = uptime_calculations.iter().any(|u| u.percentage < 100.0);
+
     let mut max_name_len = "Monitor Name".len();
     for u in &uptime_calculations {
         let name_len = u.name.len();
@@ -563,15 +750,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    println!("\n{}", "=".repeat(max_name_len + 30));
-    println!(
-        "{:<width$} | {:>8} | {:>12}",
-        "Monitor Name",
-        "Uptime %",
-        "Downtime",
-        width = max_name_len
-    );
-    println!("{}", "=".repeat(max_name_len + 30));
+    // Table header now always has two columns: Monitor Name | Status/Details
+    if has_downtime {
+        println!("\n{}", "=".repeat(max_name_len + 28));
+        println!(
+            "{:<width$} | {:<20}",
+            "Monitor Name",
+            "Status/Details",
+            width = max_name_len
+        );
+        println!("{}", "=".repeat(max_name_len + 28));
+    } else {
+        // All monitors are 100% uptime; still show status column with explicit 100%
+        println!("\n{}", "=".repeat(max_name_len + 28));
+        println!(
+            "{:<width$} | {:<20}",
+            "Monitor Name",
+            "Status",
+            width = max_name_len
+        );
+        println!("{}", "=".repeat(max_name_len + 28));
+    }
 
     let total_uptime: f64 = uptime_calculations.iter().map(|u| u.percentage).sum();
     let average_uptime = if !uptime_calculations.is_empty() {
@@ -586,35 +785,90 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let name = &u.name;
         let downtime_mins = u.downtime_mins;
 
-        if percentage < 100.0 && !printed_separator {
-            println!("{}", "-".repeat(max_name_len + 30));
-            println!("Monitors with downtime (best to worst):");
-            println!("{}", "-".repeat(max_name_len + 30));
-            printed_separator = true;
-        }
+            if percentage < 100.0 && !printed_separator {
+                let separator_len = if has_downtime { max_name_len + 28 } else { max_name_len + 8 };
+                println!("{}", "-".repeat(separator_len));
+                println!("Monitors with downtime (best to worst):");
+                println!("{}", "-".repeat(separator_len));
+                printed_separator = true;
+            }
 
         if percentage == 100.0 {
-            println!(
-                "{:<width$} | {:>7}% | {:>10} mins",
-                name,
-                "100",
-                downtime_mins,
-                width = max_name_len
-            );
+            // Show explicit 100% status
+            println!("{:<width$} | {:<20}", name, "100%", width = max_name_len);
         } else {
+            // Simplify: if we have incident periods, we will list them beneath; no need for placeholder text
+            let downtime_display = if u.downtime_periods.is_empty() {
+                if downtime_mins > 0 {
+                    "Details unavailable".to_string()
+                } else {
+                    "None".to_string()
+                }
+            } else {
+                // Show uptime percentage instead of downtime minutes
+                format!("{:.4}%", percentage)
+            };
+
             #[allow(clippy::uninlined_format_args)]
             {
                 println!(
-                    "{:<width$} | {:>7.3}% | {:>10} mins",
+                    "{:<width$} | {:<20}",
                     name,
-                    percentage,
-                    downtime_mins,
+                    downtime_display,
+                    width = max_name_len
+                );
+            }
+        }
+
+        // Show detailed downtime periods for monitors with downtime
+        if percentage < 100.0 {
+            if !u.downtime_periods.is_empty() {
+                // We have actual incident data with timestamps
+                for period in u.downtime_periods.iter() {
+                    let started_utc = DateTime::parse_from_rfc3339(&period.started_at)
+                        .map(|dt| dt.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                        .unwrap_or_else(|_| period.started_at.clone());
+                    
+                    let resolved_utc = match &period.resolved_at {
+                        Some(resolved_str) => {
+                            DateTime::parse_from_rfc3339(resolved_str)
+                                .map(|dt| dt.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                                .unwrap_or_else(|_| resolved_str.clone())
+                        }
+                        None => "Ongoing".to_string(),
+                    };
+                    
+                    let duration_str = match period.duration_mins {
+                        Some(mins) => format!(" ({}m)", mins),
+                        None => "".to_string(),
+                    };
+                    
+                    println!(
+                        "{:<width$} | {} =>",
+                        "",
+                        started_utc,
+                        width = max_name_len
+                    );
+                    println!(
+                        "{:<width$} | {}{}",
+                        "",
+                        resolved_utc,
+                        duration_str,
+                        width = max_name_len
+                    );
+                }
+            } else if downtime_mins > 0 {
+                // We have downtime but no detailed incident data
+                println!(
+                    "{:<width$} | (Time details unavailable)",
+                    "",
                     width = max_name_len
                 );
             }
         }
     }
-    println!("{}", "=".repeat(max_name_len + 30));
+    let final_separator_len = if has_downtime { max_name_len + 28 } else { max_name_len + 8 };
+    println!("{}", "=".repeat(final_separator_len));
 
     if average_uptime == 100.0 {
         println!("\nAverage Uptime: 100%");
