@@ -85,9 +85,12 @@ betterstack-report --start-date 01/01/2024 --end-date 12/31/2024 --search "produ
 
 # Combine search with status page filtering
 betterstack-report --start-date 01/01/2024 --end-date 12/31/2024 --status-page-only --search "api server" --search "web app"
+
+# Calculate and display uptime by region
+betterstack-report --start-date 01/01/2024 --end-date 12/31/2024 --regions AMER --regions EURO
 ```
 
-This will calculate the uptime for your BetterStack monitors from January 1, 2024, to December 31, 2024. The `--status-page-only` flag is useful for generating reports that focus only on customer-facing monitors. The `--search` option allows you to filter monitors by name (case-insensitive). Use multiple `--search` flags to match any of the terms (OR operator).
+This will calculate the uptime for your BetterStack monitors from January 1, 2024, to December 31, 2024. The `--status-page-only` flag is useful for generating reports that focus only on customer-facing monitors. The `--search` option allows you to filter monitors by name (case-insensitive). Use multiple `--search` flags to match any of the terms (OR operator). The `--regions` flag will calculate and display uptime for the specified regions (AMER, EURO, APAC).
 
 If you prefer to run it with cargo during development, you can still use:
 ```sh

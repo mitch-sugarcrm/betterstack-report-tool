@@ -43,6 +43,72 @@ struct Args {
     /// When all monitors have no downtime (100% uptime), skip the per-monitor table and show only the average summary
     #[arg(long)]
     skip_no_downtime: bool,
+
+    /// Calculate and display uptime by region.
+    /// If specified without values, all regions will be shown.
+    /// Can be specified multiple times with desired regions (e.g., --regions AMER --regions EURO).
+    /// Valid regions: AMER, EURO, APAC
+    #[arg(long, value_parser = parse_region, num_args = 0..)]
+    regions: Option<Vec<Region>>,
+}
+
+/// A region for grouping monitors
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+enum Region {
+    AMER,
+    EURO,
+    APAC,
+}
+
+impl Region {
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_uppercase().as_str() {
+            "AMER" => Ok(Region::AMER),
+            "EURO" => Ok(Region::EURO),
+            "APAC" => Ok(Region::APAC),
+            _ => Err(format!("invalid region: {}", s)),
+        }
+    }
+
+    fn all() -> Vec<Self> {
+        vec![Region::AMER, Region::EURO, Region::APAC]
+    }
+
+    fn to_str(&self) -> &'static str {
+        match self {
+            Region::AMER => "AMER",
+            Region::EURO => "EURO",
+            Region::APAC => "APAC",
+        }
+    }
+
+    fn get_identifiers(&self) -> Vec<&'static str> {
+        match self {
+            Region::AMER => vec!["US", "CA"],
+            Region::EURO => vec!["UK", "EU"],
+            Region::APAC => vec!["AU", "SG"],
+        }
+    }
+}
+
+/// Parses a region string into a Region enum
+fn parse_region(region_str: &str) -> Result<Region, String> {
+    Region::from_str(region_str)
+}
+
+/// Gets the region for a monitor based on its name
+fn get_monitor_region(monitor_name: &str) -> Option<Region> {
+    let upper_name = monitor_name.to_uppercase();
+    if Region::AMER.get_identifiers().iter().any(|&id| upper_name.contains(id)) {
+        return Some(Region::AMER);
+    }
+    if Region::EURO.get_identifiers().iter().any(|&id| upper_name.contains(id)) {
+        return Some(Region::EURO);
+    }
+    if Region::APAC.get_identifiers().iter().any(|&id| upper_name.contains(id)) {
+        return Some(Region::APAC);
+    }
+    None
 }
 
 /// Generic paginated response wrapper
@@ -151,6 +217,7 @@ struct UptimeCalc {
     uptime: u64,
     max_uptime: u64,
     downtime_periods: Vec<DowntimePeriod>,
+    region: Option<Region>,
 }
 
 /// BetterStack API client for making authenticated requests
@@ -559,6 +626,8 @@ impl BetterStackApi {
             }
         }
 
+        let region = get_monitor_region(monitor_name);
+
         Ok(UptimeCalc {
             id: monitor_id.to_string(),
             name: monitor_name.to_string(),
@@ -568,6 +637,7 @@ impl BetterStackApi {
             uptime: uptime_seconds,
             max_uptime: total_seconds,
             downtime_periods,
+            region,
         })
     }
 }
@@ -883,6 +953,46 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     let separator_len = max_name_len + 28;
     println!("{}", "=".repeat(separator_len));
+
+    if let Some(regions) = args.regions {
+        let regions_to_report: HashSet<Region> = if regions.is_empty() {
+            Region::all().into_iter().collect()
+        } else {
+            regions.into_iter().collect()
+        };
+
+        println!("\n{}", "=".repeat(45));
+        println!("{:<10} | {:<20} | {:<10}", "Region", "Average Uptime", "Monitors");
+        println!("{}", "=".repeat(45));
+
+        let mut regional_stats: std::collections::HashMap<Region, (f64, usize)> = std::collections::HashMap::new();
+
+        for calc in &uptime_calculations {
+            if let Some(ref region) = calc.region {
+                if regions_to_report.contains(region) {
+                    let stats = regional_stats.entry(region.clone()).or_insert((0.0, 0));
+                    stats.0 += calc.percentage;
+                    stats.1 += 1;
+                }
+            }
+        }
+
+        let mut sorted_regions: Vec<_> = regional_stats.keys().collect();
+        sorted_regions.sort_by_key(|r| r.to_str());
+
+        for region in sorted_regions {
+            if let Some(stats) = regional_stats.get(region) {
+                let average_uptime = if stats.1 > 0 { stats.0 / stats.1 as f64 } else { 0.0 };
+                println!(
+                    "{:<10} | {:<20.4} | {:<10}",
+                    region.to_str(),
+                    average_uptime,
+                    stats.1
+                );
+            }
+        }
+        println!("{}", "=".repeat(45));
+    }
 
     if average_uptime == 100.0 {
         println!("\nAverage Uptime: 100%");
