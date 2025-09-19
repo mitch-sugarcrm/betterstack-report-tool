@@ -402,19 +402,22 @@ impl BetterStackApi {
         for endpoint_path in endpoints {
             match self.try_fetch_incidents(&endpoint_path, from, to).await {
                 Ok(incidents) => {
-                    if !incidents.is_empty() {
-                        info!(
-                            monitor_id = monitor_id,
-                            endpoint = endpoint_path,
-                            count = incidents.len(),
-                            "Found incidents using endpoint"
-                        );
-                        return Ok(incidents);
-                    }
+                    // This endpoint returned incidents, so we can use it.
+                    info!(
+                        monitor_id = monitor_id,
+                        endpoint = endpoint_path,
+                        count = incidents.len(),
+                        "Found incidents using endpoint"
+                    );
+                    return Ok(incidents);
                 }
                 Err(e) => {
-                    // Only log warnings for first endpoint, others as debug
-                    if endpoint_path.contains("/incidents") {
+                    let e_str = e.to_string();
+                    if e_str.contains("HTTP 404") {
+                        // A 404 likely means no incidents for this monitor, which is not a failure.
+                        // We can continue to the next endpoint.
+                    } else if endpoint_path.contains("/incidents") {
+                        // For other errors on primary endpoints, log a warning.
                         warn!(
                             monitor_id = monitor_id,
                             endpoint = endpoint_path,
@@ -632,27 +635,41 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let monitors = betterstack_api.get_monitors().await?;
 
+    // Pre-filter monitors if search terms are provided
+    let mut monitors_to_process: Vec<Monitor> = if !args.search.is_empty() {
+        let terms: Vec<String> = args.search.iter().map(|s| s.to_lowercase()).collect();
+        monitors
+            .into_iter()
+            .filter(|m| {
+                let name = m
+                    .attributes
+                    .pronounceable_name
+                    .as_deref()
+                    .or(m.attributes.url.as_deref())
+                    .unwrap_or("Unknown")
+                    .to_lowercase();
+                terms.iter().any(|t| name.contains(t))
+            })
+            .collect()
+    } else {
+        monitors
+    };
+
     // Filter monitors based on status page flag
-    let monitors_to_process: Vec<Monitor> = if args.status_page_only {
+    if args.status_page_only {
         info!("Fetching monitors from status pages...");
         let status_page_monitor_ids = betterstack_api.get_status_page_monitors().await?;
         let id_set: HashSet<String> = status_page_monitor_ids.into_iter().collect();
 
-        let filtered: Vec<Monitor> = monitors
-            .into_iter()
-            .filter(|m| id_set.contains(&m.id))
-            .collect();
+        monitors_to_process.retain(|m| id_set.contains(&m.id));
 
         info!(
-            filtered = filtered.len(),
+            filtered = monitors_to_process.len(),
             total = id_set.len(),
             "Found monitors on status pages"
         );
-
-        filtered
     } else {
-        info!(count = monitors.len(), "Processing monitors");
-        monitors
+        info!(count = monitors_to_process.len(), "Processing monitors");
     };
 
     let sem = Arc::new(Semaphore::new(10));
@@ -687,28 +704,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .filter_map(|r| r.map_err(|e| warn!(error = %e, "calculation failed")).ok())
         .collect();
 
-    // Apply search filter if provided
-    if !args.search.is_empty() {
-        let terms: Vec<String> = args.search.iter().map(|s| s.to_lowercase()).collect();
-        uptime_calculations.retain(|u| {
-            let name_lower = u.name.to_lowercase();
-            terms.iter().any(|t| name_lower.contains(t))
-        });
-
-        if uptime_calculations.is_empty() {
+    // Report if no monitors were found after filtering
+    if uptime_calculations.is_empty() {
+        if !args.search.is_empty() {
             println!(
                 "\nNo monitors found matching any of the search terms: {}",
                 args.search.join(", ")
             );
-            return Ok(());
         }
+        return Ok(());
+    }
 
+    if !args.search.is_empty() {
         println!(
             "\nFound {} monitors matching any of the search terms: {}",
             uptime_calculations.len(),
             args.search.join(", ")
         );
     }
+
 
     // Sort monitors: 100% uptime first (alphabetically), then <100% from best to worst
     uptime_calculations.sort_by(|a, b| {
@@ -867,8 +881,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    let final_separator_len = if has_downtime { max_name_len + 28 } else { max_name_len + 8 };
-    println!("{}", "=".repeat(final_separator_len));
+    let separator_len = max_name_len + 28;
+    println!("{}", "=".repeat(separator_len));
 
     if average_uptime == 100.0 {
         println!("\nAverage Uptime: 100%");
